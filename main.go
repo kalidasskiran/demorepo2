@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -24,12 +25,66 @@ type MenuItem struct {
 	Timeofentry time.Time          `json:"timeofentry" bson:"timeofentry"`
 }
 
+//jwt
+type AuthHandler struct{}
+type Claims struct {
+	Username string `json:"username"`
+	jwt.StandardClaims
+}
+type JWTOutput struct {
+	Token   string    `json:"token"`
+	Expires time.Time `json:"expires"`
+}
+
+type User struct {
+	Password string `json:"password"`
+	Username string `json:"username"`
+}
+
+func (handler *AuthHandler) SignInHandler(c *gin.Context) {
+	var user User
+	if err := c.ShouldBindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if user.Username != "admin" || user.Password !=
+		"password" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		return
+	}
+	expirationTime := time.Now().Add(10 * time.Minute)
+	claims := &Claims{
+		Username: user.Username,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: expirationTime.Unix(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256,
+		claims)
+	tokenString, err := token.SignedString([]byte(
+		os.Getenv("JWT_SECRET")))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError,
+			gin.H{"error": err.Error()})
+		return
+	}
+	jwtOutput := JWTOutput{
+		Token:   tokenString,
+		Expires: expirationTime,
+	}
+	c.JSON(http.StatusOK, jwtOutput)
+}
+
+var authHandler AuthHandler
+
+//jwt end
 var menuitems []MenuItem
 var ctx context.Context
 var err error
 var client *mongo.Client
 
 func init() {
+
 	ctx = context.Background()
 	client, err = mongo.Connect(ctx,
 		options.Client().ApplyURI(os.Getenv("MONGO_URI")))
@@ -38,6 +93,7 @@ func init() {
 		log.Fatal(err)
 	}
 	log.Println("Connected to MongoDB")
+	authHandler = AuthHandler{}
 }
 
 func NewMenuItemHandler(c *gin.Context) {
@@ -108,23 +164,31 @@ func UpdateMenuItemsHandler(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Menu item has been updated"})
 }
-func AuthMiddleware() gin.HandlerFunc {
+func (handler *AuthHandler) AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.GetHeader("X-API-KEY") !=
-			os.Getenv("X_API_KEY") {
-			c.AbortWithStatus(401)
+		tokenValue := c.GetHeader("Authorization")
+		claims := &Claims{}
+		tkn, err := jwt.ParseWithClaims(tokenValue, claims,
+			func(token *jwt.Token) (interface{}, error) {
+				return []byte(os.Getenv("JWT_SECRET")), nil
+			})
+		if err != nil {
+			c.AbortWithStatus(http.StatusUnauthorized)
+		}
+		if tkn == nil || !tkn.Valid {
+			c.AbortWithStatus(http.StatusUnauthorized)
 		}
 		c.Next()
 	}
 }
 func main() {
 	router := gin.Default()
-	authorized := router.Group("/")
-	authorized.Use(AuthMiddleware())
-	{
-		authorized.POST("/menu", NewMenuItemHandler)
-		authorized.GET("/menu", ListMenuItemsHandler)
-		authorized.PUT("/menu/:id", UpdateMenuItemsHandler)
-	}
+	router.GET("/menu", ListMenuItemsHandler)
+	router.POST("/signin", authHandler.SignInHandler)
+
+	router.POST("/menu", NewMenuItemHandler)
+
+	router.PUT("/menu/:id", UpdateMenuItemsHandler)
+
 	router.Run()
 }
